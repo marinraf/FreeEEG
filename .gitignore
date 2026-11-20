@@ -13,6 +13,8 @@
 *-bak*
 *.csv
 *.txt
+# ...but keep the build files of the firmware (ESP-IDF / CMake)
+!CMakeLists.txt
 *~
 ~*
 _autosave-*
