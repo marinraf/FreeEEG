@@ -29,13 +29,13 @@ The current prototype integrates:
 
 ```text
 FreeEEG/
-├── Client/
+├── client/
 │   └── Python library and tools for interacting with the device
 │
-├── Electronics/
+├── electronics/
 │   └── KiCad schematic, PCB layout, and manufacturing files
 │
-├── Firmware/
+├── firmware/
 │   └── ESP32-S3 firmware based on ESP-IDF and FreeRTOS
 │
 └── README.md
@@ -87,7 +87,7 @@ In offline mode, acquisition starts automatically and data are stored locally on
 
 ## Client Library
 
-The `Client/` folder contains the Python interface used to communicate with the device. The client library provides a higher-level interface for:
+The `client/` folder contains the Python interface used to communicate with the device. The client library provides a higher-level interface for:
 
 - Connecting to the FreeEEG device
 - Sending start and stop commands
@@ -127,7 +127,7 @@ if __name__ == "__main__":
 
 ## Electronics
 
-The `Electronics/` folder contains the KiCad project files needed to inspect, modify, and manufacture the PCB.
+The `electronics/` folder contains the KiCad project files needed to inspect, modify, and manufacture the PCB.
 
 This folder may include:
 
