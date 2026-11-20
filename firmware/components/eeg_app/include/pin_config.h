@@ -28,3 +28,5 @@
 #define BATTERY_PIN	4
 
 #define SWITCH_PIN      16
+// Switch level that selects offline (SD card) recording.
+#define SWITCH_LEVEL_OFFLINE 1

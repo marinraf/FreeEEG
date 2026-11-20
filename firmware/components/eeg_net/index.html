@@ -4,30 +4,22 @@
 <form action="/update_config" method="post">
   <h2>General configuration</h2>
 
-  <p>Notch filter frequency:</p>
-  <input type="radio" id="filt_50" name="filt_freq" value="50" checked>
-  <label for="filt_50">50 Hz</label><br>
-
-  <input type="radio" id="filt_60" name="filt_freq" value="60">
-  <label for="filt_60">60 Hz</label><br>
-
-  <br>
-
   <label for="sample_rate">Sampling rate:</label>
   <select name="sample_rate" id="sample_rate">
     <option value="250" selected>250 SPS</option>
     <option value="500">500 SPS</option>
     <option value="1000">1000 SPS</option>
-    <option value="2000">2000 SPS</option>
-    <option value="4000">4000 SPS</option>
-    <option value="8000">8000 SPS</option>
-    <option value="16000">16000 SPS</option>
   </select>
 
   <br><br>
 
   <input type="checkbox" id="comm_ref" name="comm_ref" value="1">
   <label for="comm_ref">Use common reference for all electrodes</label>
+
+  <br><br>
+
+  <input type="checkbox" id="lead_off" name="lead_off" value="1">
+  <label for="lead_off">Detect electrodes with bad contact (lead-off, adds a 6 nA DC current)</label>
 
   <br><br>
 
@@ -157,3 +149,23 @@
 
   <input type="submit" value="Send configuration">
 </form>
+
+<script>
+  // The board has no clock battery: give it this computer's time.
+  fetch("/time", { method: "POST", body: String(Date.now()) })
+    .catch(e => console.log("Could not set the clock", e));
+
+  // Show the configuration currently stored on the device.
+  fetch("/config")
+    .then(r => r.json())
+    .then(cfg => {
+      document.getElementById("sample_rate").value = String(cfg.sample_rate);
+      document.getElementById("comm_ref").checked = cfg.comm_ref;
+      document.getElementById("lead_off").checked = cfg.lead_off;
+      cfg.channels.forEach((ch, i) => {
+        document.querySelector(`select[name="ch${i+1}_mode"]`).value = String(ch.mode);
+        document.querySelector(`select[name="ch${i+1}_gain"]`).value = String(ch.gain);
+      });
+    })
+    .catch(e => console.log("Could not load current config", e));
+</script>

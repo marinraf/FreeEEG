@@ -80,11 +80,10 @@ void wifi_udp_stop(void) {
     }
 }
 
-void wifi_udp_send_packet(const udp_packet_t* packet) {
-  uint8_t buffer[sizeof(udp_packet_t)];
-  uint8_t *p_buff = buffer;
+size_t udp_packet_serialize(const udp_packet_t *packet, uint8_t *out) {
+  uint8_t *p_buff = out;
   
-  *((uint32_t *) p_buff) = packet->abs_time;
+  memcpy(p_buff, &packet->abs_time, 4);
   p_buff += 4;
   
   *p_buff = packet->num_elec;
@@ -93,8 +92,12 @@ void wifi_udp_send_packet(const udp_packet_t* packet) {
   p_buff += 1;
   memcpy(p_buff, packet->elec_time, packet->num_elec_samp*4);
   p_buff += packet->num_elec_samp*4;
-  memcpy(p_buff, packet->elec_data, packet->num_elec*packet->num_elec_samp*4);
-  p_buff += packet->num_elec*packet->num_elec_samp*4;
+  // elec_data rows are 8 wide; only the first num_elec entries of each row
+  // are meaningful, so pack them sample by sample.
+  for (uint8_t s = 0; s < packet->num_elec_samp; s++) {
+    memcpy(p_buff, packet->elec_data[s], packet->num_elec*4);
+    p_buff += packet->num_elec*4;
+  }
 
   *p_buff = packet->num_imu;
   p_buff += 1;
@@ -109,12 +112,19 @@ void wifi_udp_send_packet(const udp_packet_t* packet) {
   p_buff += 1;
   memcpy(p_buff, packet->events_time, packet->num_events*4);
   p_buff += packet->num_events*4;
-  memcpy(p_buff, packet->events, packet->num_events*4);
-  p_buff += packet->num_events*4;
+  memcpy(p_buff, packet->events, packet->num_events);
+  p_buff += packet->num_events;
 
-  uint16_t size = p_buff - buffer;
-  
-  wifi_udp_send((const uint8_t*) buffer, size);
+  *p_buff++ = packet->loff_p;
+  *p_buff++ = packet->loff_n;
+
+  return p_buff - out;
+}
+
+void wifi_udp_send_packet(const udp_packet_t* packet) {
+  uint8_t buffer[UDP_PACKET_MAX_SIZE];
+  size_t size = udp_packet_serialize(packet, buffer);
+  wifi_udp_send(buffer, size);
 }
 
 bool wifi_udp_recv_packet(uint8_t *buffer) {

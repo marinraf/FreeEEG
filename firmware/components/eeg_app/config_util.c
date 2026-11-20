@@ -2,6 +2,7 @@
 
 #include "esp_log.h"
 
+#include <assert.h>
 #include <stdlib.h>
 
 #define TAG "config_util"
@@ -39,6 +40,7 @@ ads1299_config_t config_to_ads1299(const config_t *config) {
     }
 
     ads_config.comm_ref = config->common_reference;
+    ads_config.lead_off = config->lead_off;
 
     for (uint8_t i = 0; i < FREEEEG_NUM_CHANNELS; i++) {
         switch (config->channel_mode[i]) {

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/time.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -30,11 +31,10 @@ static esp_err_t http_root_handler(httpd_req_t *req) {
 config_samplerate_t parse_sample_rate(const char *value) {
     if (strcmp(value, "250") == 0) return CONFIG_SAMPLERATE_250;
     if (strcmp(value, "500") == 0) return CONFIG_SAMPLERATE_500;
-    if (strcmp(value, "1000") == 0) return CONFIG_SAMPLERATE_1000;
-    if (strcmp(value, "2000") == 0) return CONFIG_SAMPLERATE_2000;
-    if (strcmp(value, "4000") == 0) return CONFIG_SAMPLERATE_4000;
-    if (strcmp(value, "8000") == 0) return CONFIG_SAMPLERATE_8000;
-    if (strcmp(value, "16000") == 0) return CONFIG_SAMPLERATE_16000;
+    // Higher ADS1299 rates exist, but UDP streaming (30 samples per packet,
+    // one packet per loop) and the 100 Hz FreeRTOS tick are not designed for
+    // them, so they are clamped to 1000 SPS.
+    if (atoi(value) >= 1000) return CONFIG_SAMPLERATE_1000;
 
     return CONFIG_SAMPLERATE_250;
 }
@@ -65,15 +65,37 @@ config_channel_mode_t parse_channel_mode(const char *value) {
     return CONFIG_CHANNEL_PWRDWN;
 }
 
-config_filtfreq_t parse_filter_freq(const char *value) {
-    if (strcmp(value, "60") == 0)
-        return CONFIG_FILTFREQ_60HZ;
+/*
+ * GET /config -> current configuration as JSON, using the same values the
+ * web form uses, so the page can show what is actually stored on the device.
+ */
+static esp_err_t http_get_config_handler(httpd_req_t *req) {
+    static const int gain_val[] = {1, 2, 4, 6, 8, 12, 24};
+    const config_t *cfg = get_config();
 
-    return CONFIG_FILTFREQ_50HZ;
+    char json[512];
+    int n = snprintf(json, sizeof(json),
+                     "{\"sample_rate\":%d,\"comm_ref\":%s,\"lead_off\":%s,\"channels\":[",
+                     250 << cfg->sample_rate,
+                     cfg->common_reference ? "true" : "false",
+                     cfg->lead_off ? "true" : "false");
+
+    for (uint8_t i = 0; i < FREEEEG_NUM_CHANNELS; i++) {
+        // Web form mode values are the config enum shifted by one (PWRDWN = -1).
+        n += snprintf(json + n, sizeof(json) - n,
+                      "%s{\"mode\":%d,\"gain\":%d}",
+                      i ? "," : "",
+                      (int) cfg->channel_mode[i] - 1,
+                      gain_val[cfg->gain[i]]);
+    }
+    snprintf(json + n, sizeof(json) - n, "]}");
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, json);
 }
 
 static esp_err_t http_update_handler(httpd_req_t *req) {
-    char content[256];
+    char content[512];
 
     int recv_len = httpd_req_recv(
         req,
@@ -92,8 +114,8 @@ static esp_err_t http_update_handler(httpd_req_t *req) {
     const uint8_t BUFF_LEN = 16;
     char buff[BUFF_LEN];
 
-    config_t config;
-    
+    config_t config = {0};
+
     for (uint8_t i = 0; i < 8; ++i) {
       char mode[10];
       char gain[10];
@@ -109,10 +131,6 @@ static esp_err_t http_update_handler(httpd_req_t *req) {
       } else goto fail;
     }
 
-    if (httpd_query_key_value(content, "filt_freq", buff, BUFF_LEN) == ESP_OK) {
-      config.filt_freq = parse_filter_freq(buff);
-    } else goto fail;
-
     if (httpd_query_key_value(content, "sample_rate", buff, BUFF_LEN) == ESP_OK) {
       config.sample_rate = parse_sample_rate(buff);
     } else goto fail;
@@ -122,17 +140,53 @@ static esp_err_t http_update_handler(httpd_req_t *req) {
       config.common_reference = true;
     else
       config.common_reference = false;
-    
-    httpd_resp_sendstr(req, "Configuration updated");
 
-    set_config(&config);
+    config.lead_off = httpd_query_key_value(content, "lead_off", buff, BUFF_LEN) == ESP_OK;
     
+    // set_config() also notifies the listener, which reprograms the ADS1299.
+    set_config(&config);
+    // Persist it so it survives a reboot.
+    store_config();
+
+    httpd_resp_sendstr(req, "Configuration saved and applied. <a href=\"/\">Back</a>");
+
     return ESP_OK;
 
  fail:
     ESP_LOGE(TAG, "Malfromed configuration request"); 
     httpd_resp_sendstr(req, "Error updating configuration");
     return ESP_FAIL;
+}
+
+/*
+ * POST /time, body = milliseconds since the Unix epoch (the page sends
+ * Date.now() when it loads). The board has no RTC, so this is how recordings
+ * get real timestamps. The HTTP server only runs while not measuring, so the
+ * clock never jumps in the middle of a recording.
+ */
+static esp_err_t http_time_handler(httpd_req_t *req) {
+    char content[32];
+    int recv_len = httpd_req_recv(req, content, MIN(req->content_len, sizeof(content) - 1));
+    if (recv_len <= 0) {
+        return ESP_FAIL;
+    }
+    content[recv_len] = '\0';
+
+    long long ms = atoll(content);
+    if (ms < 1000000000000LL) {  // before 2001: not a real wall-clock time
+        httpd_resp_sendstr(req, "Bad time");
+        return ESP_OK;
+    }
+
+    struct timeval tv = {
+        .tv_sec = ms / 1000,
+        .tv_usec = (ms % 1000) * 1000,
+    };
+    settimeofday(&tv, NULL);
+    ESP_LOGI(TAG, "Clock set from web page: %lld ms", ms);
+
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
 }
 
 void wifi_http_start(void) {
@@ -159,8 +213,24 @@ void wifi_http_start(void) {
     .user_ctx = NULL,
   };
   
+  httpd_uri_t get_config_uri = {
+    .uri = "/config",
+    .method = HTTP_GET,
+    .handler = http_get_config_handler,
+    .user_ctx = NULL,
+  };
+
   ESP_ERROR_CHECK(httpd_register_uri_handler(http_server, &root_uri));
   ESP_ERROR_CHECK(httpd_register_uri_handler(http_server, &update_uri));
+  ESP_ERROR_CHECK(httpd_register_uri_handler(http_server, &get_config_uri));
+
+  httpd_uri_t time_uri = {
+    .uri = "/time",
+    .method = HTTP_POST,
+    .handler = http_time_handler,
+    .user_ctx = NULL,
+  };
+  ESP_ERROR_CHECK(httpd_register_uri_handler(http_server, &time_uri));
 
   ESP_LOGI(TAG, "HTTP server initialized");
 }

@@ -1,5 +1,7 @@
 #include "config.h"
 
+#include <assert.h>
+
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -8,7 +10,12 @@
 
 #define STORAGE_NAMESPACE "config"
 
+// Bump whenever config_t changes meaning: a stored blob with another version
+// is discarded (a size check alone misses fields added into padding).
+#define CONFIG_STORAGE_VERSION 2
+
 static config_t config = {0};
+static config_listener_t listener = NULL;
 
 const config_t* get_config() {
   return &config;
@@ -42,9 +49,9 @@ void config_init(void)
 }
 
 void default_config(config_t *conf) {
-  conf->filt_freq = CONFIG_FILTFREQ_50HZ;
   conf->sample_rate = CONFIG_SAMPLERATE_250;
   conf->common_reference = false;
+  conf->lead_off = false;
 
   for (uint8_t i = 0; i < FREEEEG_NUM_CHANNELS; i++) {
     conf->channel_mode[i] = CONFIG_CHANNEL_SHORTED;
@@ -95,14 +102,14 @@ static const char *sample_rate_str(config_samplerate_t rate) {
 
 void log_config(const config_t *cfg) {
   ESP_LOGI(TAG, "===== CONFIGURATION =====");
-  ESP_LOGI(TAG, "Filter: %s",
-	   cfg->filt_freq == CONFIG_FILTFREQ_50HZ ? "50 Hz" : "60 Hz");
-
   ESP_LOGI(TAG, "Sample rate: %s",
 	   sample_rate_str(cfg->sample_rate));
 
   ESP_LOGI(TAG, "Common reference: %s",
 	   cfg->common_reference ? "enabled" : "disabled");
+
+  ESP_LOGI(TAG, "Lead-off detection: %s",
+	   cfg->lead_off ? "enabled" : "disabled");
 
   for (int i = 0; i < FREEEEG_NUM_CHANNELS; i++) {
     ESP_LOGI(TAG,
@@ -115,10 +122,18 @@ void log_config(const config_t *cfg) {
   ESP_LOGI(TAG, "=========================");
 }
 
+void config_set_listener(config_listener_t cb) {
+    listener = cb;
+}
+
 void set_config(const config_t *cfg) {
     assert(cfg != NULL);
     config = *cfg;
     log_config(&config);
+
+    if (listener != NULL) {
+        listener(&config);
+    }
 }
 
 void store_config(void) {
@@ -152,6 +167,15 @@ void store_config(void) {
         return;
     }
 
+    err = nvs_set_u8(my_handle, "config_ver", CONFIG_STORAGE_VERSION);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write configuration version: %s",
+                 esp_err_to_name(err));
+        nvs_close(my_handle);
+        return;
+    }
+
     err = nvs_commit(my_handle);
 
     if (err != ESP_OK) {
@@ -167,6 +191,14 @@ bool load_config(void) {
 
     esp_err_t err = nvs_open(STORAGE_NAMESPACE, NVS_READONLY, &my_handle);
     if (err != ESP_OK) {
+        return false;
+    }
+
+    uint8_t version = 0;
+    if (nvs_get_u8(my_handle, "config_ver", &version) != ESP_OK ||
+        version != CONFIG_STORAGE_VERSION) {
+        ESP_LOGW(TAG, "Stored config is from another firmware version, ignoring it");
+        nvs_close(my_handle);
         return false;
     }
 

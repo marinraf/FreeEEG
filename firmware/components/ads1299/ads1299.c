@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 static const char* TAG = "ADS1299";
 
@@ -29,10 +30,15 @@ static const char* TAG = "ADS1299";
 #define	ADS1299_REG_CONFIG1	0x01
 #define ADS1299_REG_CONFIG2	0x02
 #define ADS1299_REG_CONFIG3	0x03
+#define ADS1299_REG_LOFF	0x04
 #define ADS1299_REG_CH1SET	0x05
 #define ADS1299_REG_BIAS_SENSP	0x0D
 #define ADS1299_REG_BIAS_SENSN	0x0E
+#define ADS1299_REG_LOFF_SENSP	0x0F
+#define ADS1299_REG_LOFF_SENSN	0x10
+#define ADS1299_REG_LOFF_FLIP	0x11
 #define ADS1299_REG_MISC1	0x15
+#define ADS1299_REG_CONFIG4	0x17
 
 #define ADS1299_FRAME_SIZE 27
 
@@ -222,7 +228,24 @@ void ads1299_send_config(const ads1299_config_t* conf) {
   ads1299_write_reg(ADS1299_REG_CONFIG2, 0xD0);
 
   // CONFIG3:
-  ads1299_write_reg(ADS1299_REG_CONFIG3, 0xE0);
+  //  bit7 PD_REFBUF     = 1 internal reference buffer on
+  //  bit6:5             = 11 reserved
+  //  bit3 BIASREF_INT   = 1 bias reference = (AVDD+AVSS)/2 generated internally
+  //                         (BIASREF pin is not connected on the board)
+  //  bit2 PD_BIAS       = 1 bias buffer on -> drives BIAS_ELEC (J1 pin 18)
+  ads1299_write_reg(ADS1299_REG_CONFIG3, 0xEC);
+
+  // Bias sensing: derive the common mode from every channel that is measuring
+  // an electrode. With common reference (SRB1) all negative inputs are the same
+  // node, so only the positive inputs are sensed.
+  uint8_t bias_mask = 0;
+  for (int i = 0; i < NUM_ELECTRODES; i++) {
+    if (conf->electrodes[i] == ADS1299_CONFIG_MODE_NORMAL) {
+      bias_mask |= (1 << i);
+    }
+  }
+  ads1299_write_reg(ADS1299_REG_BIAS_SENSP, bias_mask);
+  ads1299_write_reg(ADS1299_REG_BIAS_SENSN, conf->comm_ref ? 0x00 : bias_mask);
 
   for (int i = 0; i < NUM_ELECTRODES; i++) {
     uint8_t ch_reg = ADS1299_REG_CH1SET + i;
@@ -240,11 +263,39 @@ void ads1299_send_config(const ads1299_config_t* conf) {
   // Enable/Disable SRB1 common reference routing.
   ads1299_write_reg(ADS1299_REG_MISC1, conf->comm_ref ? 0x20 : 0x00);
 
+  // Lead-off detection.
+  //  LOFF = 0x00: comparator threshold 95 % / 5 %, 6 nA current, DC.
+  //  6 nA through a ~1 MOhm dry contact is only a few mV of DC offset, far
+  //  below the +-187 mV range at gain 24, and the comparator trips when an
+  //  open input is pulled to the rail.
+  //  With SRB1 all negative inputs are the same node, so sensing the negative
+  //  side of a single channel is enough to check the reference electrode.
+  uint8_t loff_sensp = 0, loff_sensn = 0;
+  if (conf->lead_off) {
+    loff_sensp = bias_mask;
+    if (conf->comm_ref) {
+      loff_sensn = bias_mask & (~bias_mask + 1);  // lowest active channel only
+    } else {
+      loff_sensn = bias_mask;
+    }
+  }
+  ads1299_write_reg(ADS1299_REG_LOFF, 0x00);
+  ads1299_write_reg(ADS1299_REG_LOFF_FLIP, 0x00);
+  ads1299_write_reg(ADS1299_REG_LOFF_SENSP, loff_sensp);
+  ads1299_write_reg(ADS1299_REG_LOFF_SENSN, loff_sensn);
+  //  CONFIG4 bit1 PD_LOFF_COMP: lead-off comparators on.
+  ads1299_write_reg(ADS1299_REG_CONFIG4, conf->lead_off ? 0x02 : 0x00);
+
   ESP_LOGI(TAG, "CONFIG1 = 0x%02X", ads1299_read_register(ADS1299_REG_CONFIG1));
   ESP_LOGI(TAG, "CONFIG2 = 0x%02X", ads1299_read_register(ADS1299_REG_CONFIG2));
   ESP_LOGI(TAG, "CONFIG3 = 0x%02X", ads1299_read_register(ADS1299_REG_CONFIG3));
   ESP_LOGI(TAG, "MISC1   = 0x%02X", ads1299_read_register(ADS1299_REG_MISC1));
+  ESP_LOGI(TAG, "BIAS_SENSP = 0x%02X", ads1299_read_register(ADS1299_REG_BIAS_SENSP));
+  ESP_LOGI(TAG, "BIAS_SENSN = 0x%02X", ads1299_read_register(ADS1299_REG_BIAS_SENSN));
   ESP_LOGI(TAG, "CH1SET  = 0x%02X", ads1299_read_register(ADS1299_REG_CH1SET));
+  ESP_LOGI(TAG, "LOFF_SENSP = 0x%02X", ads1299_read_register(ADS1299_REG_LOFF_SENSP));
+  ESP_LOGI(TAG, "LOFF_SENSN = 0x%02X", ads1299_read_register(ADS1299_REG_LOFF_SENSN));
+  ESP_LOGI(TAG, "CONFIG4 = 0x%02X", ads1299_read_register(ADS1299_REG_CONFIG4));
 }
 
 void ads1299_start(void) {
@@ -276,6 +327,13 @@ void ads1299_read(ads1299_data_t *data) {
   data->status[0] = raw[0];
   data->status[1] = raw[1];
   data->status[2] = raw[2];
+
+  /*
+   * Status word: 1100 | LOFF_STATP[7:0] | LOFF_STATN[7:0] | GPIO[3:0]
+   */
+  uint32_t status = ((uint32_t)raw[0] << 16) | ((uint32_t)raw[1] << 8) | raw[2];
+  data->loff_p = (status >> 12) & 0xFF;
+  data->loff_n = (status >> 4) & 0xFF;
 
   /*
    * ADS1299 channels:

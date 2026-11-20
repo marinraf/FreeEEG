@@ -2,6 +2,7 @@
 
 #include <inttypes.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 // AP creation
 #define AP_NAME   "FreeEEG"
@@ -35,7 +36,26 @@ typedef struct {
   uint8_t num_events;
   uint32_t events_time[UDP_EVENT_BUFF_SIZE];
   uint8_t events[UDP_EVENT_BUFF_SIZE];
+
+  // Lead-off flags seen in any EEG sample of this packet, bit i = channel i+1
+  // (absolute channel number, not the packed column). loff_n with common
+  // reference means the reference electrode is off.
+  uint8_t loff_p;
+  uint8_t loff_n;
 } udp_packet_t;
+
+// Largest serialized packet (see udp_packet_serialize):
+// header 6 + EEG 30*(4 + 8*4) + IMU 1 + 5*(4+6+6) + events 1 + 2*(4+1) + lead-off 2
+#define UDP_PACKET_MAX_SIZE (6 + UDP_ELEC_BUFF_SIZE * (4 + 8 * 4) \
+                             + 1 + UDP_IMU_BUFF_SIZE * (4 + 6 + 6) \
+                             + 1 + UDP_EVENT_BUFF_SIZE * (4 + 1) + 2)
+
+/*
+ * Packs a packet into the compact little-endian wire format used both for UDP
+ * streaming and for the records of the SD card files. `out` must hold
+ * UDP_PACKET_MAX_SIZE bytes. Returns the number of bytes written.
+ */
+size_t udp_packet_serialize(const udp_packet_t *packet, uint8_t *out);
 
 void wifi_udp_start(void);
 void wifi_udp_stop(void);

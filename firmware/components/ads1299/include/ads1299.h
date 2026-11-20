@@ -1,6 +1,7 @@
 #pragma once
 
 #include <inttypes.h>
+#include <stdbool.h>
 #include <sys/time.h>
 
 #define NUM_ELECTRODES 8
@@ -42,12 +43,20 @@ typedef struct {
   ads1299_config_channel_mode_t electrodes[NUM_ELECTRODES];
   ads1299_config_gain_t gains[NUM_ELECTRODES];
   bool comm_ref;
+  // DC lead-off detection (6 nA current source + comparators) on every
+  // NORMAL channel, and on the shared reference when comm_ref is set.
+  bool lead_off;
 } ads1299_config_t;
 
 typedef struct {
   struct timeval timestamp;
   uint8_t status[3];
   int32_t channel[8];
+  // Lead-off comparator flags from the status word, bit i = channel i+1.
+  // loff_p: positive input (the electrode). loff_n: negative input; with the
+  // SRB1 common reference this is the reference electrode.
+  uint8_t loff_p;
+  uint8_t loff_n;
 } ads1299_data_t;
 
 void ads1299_init(uint8_t pin_mosi, uint8_t pin_miso, uint8_t pin_sck, uint8_t pin_cs, uint8_t pin_drdy, uint8_t pin_start, void (*drdy_callback)(void));

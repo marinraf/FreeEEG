@@ -6,11 +6,6 @@
 #define FREEEEG_NUM_CHANNELS 8
 
 typedef enum {
-    CONFIG_FILTFREQ_50HZ = 0,
-    CONFIG_FILTFREQ_60HZ,
-} config_filtfreq_t;
-
-typedef enum {
     CONFIG_SAMPLERATE_250,
     CONFIG_SAMPLERATE_500,
     CONFIG_SAMPLERATE_1000,
@@ -43,17 +38,25 @@ typedef enum {
 } config_gain_t;
 
 typedef struct {
-    config_filtfreq_t filt_freq;
     config_samplerate_t sample_rate;
 
     bool common_reference;
+    bool lead_off;
 
     config_channel_mode_t channel_mode[FREEEEG_NUM_CHANNELS];
     config_gain_t gain[FREEEEG_NUM_CHANNELS];
 } config_t;
 
+/*
+ * Called every time set_config() changes the active configuration.
+ * Used by the application layer to push the new settings to the ADS1299
+ * without making the network/core layers depend on the AFE driver.
+ */
+typedef void (*config_listener_t)(const config_t *config);
+
 const config_t *get_config(void);
 void config_init();
+void config_set_listener(config_listener_t listener);
 void set_config(const config_t *config);
 void store_config();
 bool load_config();

@@ -16,6 +16,7 @@ TaskHandle_t task_write_handle;
 TaskHandle_t task_config_handle;
 TaskHandle_t task_recv_handle;
 TaskHandle_t task_sound_handle;
+TaskHandle_t task_mode_handle;
 
 /* #define SDCARD_PIN_DATA0	2 */
 /* #define SDCARD_PIN_DATA1	1 */
@@ -70,6 +71,7 @@ void app_main(void) {
   xTaskCreatePinnedToCore(task_imu,"task_imu", 10000, NULL, 0, &task_imu_handle, 1);
   xTaskCreatePinnedToCore(task_write,"task_write", 10000, NULL, 0, &task_write_handle, 0);
   xTaskCreatePinnedToCore(task_recv,"task_recv", 10000, NULL, 0, &task_recv_handle, 0);
+  xTaskCreatePinnedToCore(task_mode,"task_mode", 8192, NULL, 5, &task_mode_handle, 0);
   /* xTaskCreatePinnedToCore(task_sound,"task_sound", 1024*120, NULL, 0, &task_sound_handle, 0); */
 
   /* udp_packet_t packet = {0}; */
