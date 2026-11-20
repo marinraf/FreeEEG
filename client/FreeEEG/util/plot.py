@@ -1,4 +1,4 @@
-from FreeEEG import FreeEEG
+from FreeEEG import FreeEEG, Packet, contact_report
 
 if __name__ == '__main__':
     import signal
@@ -18,7 +18,12 @@ if __name__ == '__main__':
     )
 
     parser.add_argument('-s', '--save', action='store_true')
-    parser.add_argument('-e', '--elec', type=int, choices=list(range(FreeEEG.N_ELECTRODE)), action='append', required=True)
+    parser.add_argument('-e', '--elec', type=int, choices=list(range(FreeEEG.N_ELECTRODE)), action='append', default=[],
+                        help='active channel index to plot (0 = first powered-up channel). Repeatable.')
+    parser.add_argument('-d', '--deriv', type=str, action='append', default=[],
+                        help='derivation A-B between active channel indexes, e.g. -d 0-2 plots ch0 minus ch2. Repeatable.')
+    parser.add_argument('--ip', type=str, default='192.168.4.1', help='device IP (127.0.0.1 for simulate_device.py)')
+    parser.add_argument('--port', type=int, default=69, help='device UDP port (4321 for simulate_device.py)')
     parser.add_argument('-i', '--imu', type=str, choices=['a.x', 'a.y', 'a.z', 'g.x', 'g.y', 'g.z'], action='append')
     parser.add_argument('-g', '--gain', type=int)
     parser.add_argument('--psd', action='store_true')
@@ -27,8 +32,20 @@ if __name__ == '__main__':
     
     args = parser.parse_args(argv[1:])
 
+    # Each trace is (label, channel_a, channel_b or None): a single channel or a
+    # derivation a - b computed from two channels that share the same reference.
+    TRACES = {f'ch{e}': (e, None) for e in args.elec}
+    for d in args.deriv:
+        try:
+            a, b = (int(x) for x in d.split('-'))
+        except ValueError:
+            parser.error(f'invalid derivation "{d}", expected A-B, e.g. 0-2')
+        TRACES[f'ch{a}-ch{b}'] = (a, b)
+    if not TRACES:
+        parser.error('select at least one channel (-e) or derivation (-d)')
+
     BUFFER_SIZE = 1000
-    CHANNELS_TO_PLOT = args.elec
+    CHANNELS_TO_PLOT = list(TRACES)
     IMU_TO_PLOT = args.imu or []
 
     imu_index = {
@@ -40,7 +57,7 @@ if __name__ == '__main__':
         'g.z': ('gyro', 2),
     }
 
-    eeg = FreeEEG()
+    eeg = FreeEEG(args.ip, args.port)
 
     data_stream = eeg.get_data_generator(blocking=False)
     generator = data_stream()
@@ -95,6 +112,7 @@ if __name__ == '__main__':
         return y
 
     t0 = None
+    last_contact = None
     
     def signal_handler(sig, frame):
         eeg.stop()
@@ -124,12 +142,12 @@ if __name__ == '__main__':
 
     eeg_lines = {}
     for ch in CHANNELS_TO_PLOT:
-        line, = ax_eeg.plot([], [], label=f'EEG channel {ch}')
+        line, = ax_eeg.plot([], [], label=ch)
         eeg_lines[ch] = line
 
     ax_eeg.set_title('FreeEEG real-time EEG data')
     ax_eeg.set_xlabel('Time (s)')
-    ax_eeg.set_ylabel('Voltage (V)')
+    ax_eeg.set_ylabel('Voltage (V)' if args.gain else 'ADC counts')
     ax_eeg.grid(True)
     ax_eeg.legend(loc='upper right')
 
@@ -148,7 +166,7 @@ if __name__ == '__main__':
     psd_lines = {}
     if args.psd:
         for ch in CHANNELS_TO_PLOT:
-            line, = ax_psd.plot([], [], label=f'EEG channel {ch}')
+            line, = ax_psd.plot([], [], label=ch)
             psd_lines[ch] = line
 
         ax_psd.set_title('EEG power spectral density')
@@ -161,7 +179,7 @@ if __name__ == '__main__':
     if args.save:
         start = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         csv = open(f"recording_{start}.csv", "w+")
-        csv.write(FreeEEG.Packet.CSV_HEADER)
+        csv.write(Packet.CSV_HEADER)
 
     def compute_psd(values, fs):
         y = np.asarray(values, dtype=float)
@@ -181,7 +199,7 @@ if __name__ == '__main__':
         return freqs, psd
 
     def update(frame):
-        global t0, csv
+        global t0, csv, last_contact
 
         packets = []
         while (packet := next(generator)) != None:
@@ -190,15 +208,29 @@ if __name__ == '__main__':
         if len(packets) == 0:
             return tuple(eeg_lines.values()) + tuple(imu_lines.values()) + tuple(psd_lines.values())
 
+        if t0 is None:
+            t0 = packets[0].abs_time  # x axis in seconds since the first packet
+
         for packet in packets:
+            if packet.elec_data:
+                contact = contact_report(packet.loff_p, packet.loff_n)
+                if contact != last_contact:
+                    print(f"Electrode contact: {contact}")
+                    last_contact = contact
             if args.save:
                 csv.write(packet.as_csv(args.gain))
             for t, data in packet.elec_data:
-                ts = t/1e6+packet.abs_time
+                ts = t/1e6 + packet.abs_time - t0
                 time_data.append(ts)
 
                 for ch in CHANNELS_TO_PLOT:
-                    adc_value = data[ch]
+                    a, b = TRACES[ch]
+                    if max(a, b if b is not None else 0) >= len(data):
+                        # exceptions inside the animation callback are swallowed by matplotlib
+                        print(f'{ch}: the device is only sending {len(data)} active channels (indexes 0-{len(data)-1})')
+                        plt.close('all')
+                        return ()
+                    adc_value = data[a] - (data[b] if b is not None else 0)
                     volts = adc_value
                     if args.gain != None:
                         volts = FreeEEG.adc_to_volts(adc_value, args.gain)
@@ -209,7 +241,7 @@ if __name__ == '__main__':
                     channel_data[ch].append(volts)
 
             for t, accel, gyro in packet.imu_data:
-                ts = t/1e6+packet.abs_time
+                ts = t/1e6 + packet.abs_time - t0
                 imu_time_data.append(ts)
 
                 for name in IMU_TO_PLOT:

@@ -2,6 +2,7 @@ from multiprocessing import Pipe
 import threading
 import socket
 import struct
+import time
 from dataclasses import dataclass
 
 from .protocol import *
@@ -11,7 +12,7 @@ class FreeEEG:
                  '__pipe_in', '__pipe_out', 
                  '__filler_thread', '__active')
 
-    FSR = 5.0
+    VREF = VREF  # ADC reference (V); full scale is +-VREF/gain
     __BUFF_SIZE = 1024*10
     N_ELECTRODE = N_ELECTRODE
     
@@ -42,7 +43,10 @@ class FreeEEG:
 
     def __stream_filler(self):
         while self.__active:
-            packet = self.__udp.recv(self.__BUFF_SIZE)
+            try:
+                packet = self.__udp.recv(self.__BUFF_SIZE)
+            except OSError:
+                break  # socket closed by stop()
             try:
                 self.__pipe_in.send(Packet.parse_packet(packet))
             except Exception as e:
@@ -53,6 +57,9 @@ class FreeEEG:
         if self.__active:
             return
         
+        # The board has no clock battery: give it our time before starting so
+        # packet timestamps are real Unix times (ignored while it is measuring).
+        self.__udp.sendto(f"time {time.time():.6f}".encode(), self.__remote_address)
         self.__udp.sendto("start".encode(), self.__remote_address)
         self.__filler_thread = threading.Thread(target=self.__stream_filler, daemon=True)
         self.__active = True
@@ -66,5 +73,6 @@ class FreeEEG:
         self.__udp.sendto("stop".encode(), self.__remote_address)
         self.__udp.close()
 
+    @staticmethod
     def adc_to_volts(value, gain):
-        return value * FreeEEG.FSR / (gain*8388607.0)
+        return adc_to_volts(value, gain)
